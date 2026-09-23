@@ -1,5 +1,6 @@
 package com.example.lect7arcv
 
+import android.media.Image
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
@@ -13,6 +14,11 @@ import com.google.ar.core.Frame
 import com.google.ar.core.Plane
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
+import org.opencv.core.Core
+import org.opencv.core.CvType
+import org.opencv.core.Mat
+import org.opencv.core.Size
+import org.opencv.imgproc.Imgproc
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -23,7 +29,8 @@ import javax.microedition.khronos.opengles.GL10
 class ArRenderer(
     private val onAnchorPlaced: (Anchor) -> Unit,
     private val onNoFloorHit: () -> Unit,
-    private val onTrackingUpdate: (TrackingState, Boolean) -> Unit // (trackingState, floorVisible)
+    private val onTrackingUpdate: (TrackingState, Boolean) -> Unit, // (trackingState, floorVisible)
+    private val onTextureScore: (Float) -> Unit // % of edge pixels in a downsampled Canny pass
 ) : GLSurfaceView.Renderer {
 
     @Volatile
@@ -45,6 +52,11 @@ class ArRenderer(
     private var surfaceWidth = 0
     private var surfaceHeight = 0
     private var frameCount = 0
+
+    // Texture-score throttle: this runs OpenCV work on the GL thread, so it must stay
+    // cheap and infrequent. Every 15th eligible frame is roughly twice a second at 30fps.
+    private var textureFrameCounter = 0
+    private val textureFrameInterval = 15
 
     // --- Camera passthrough background ---
     private var cameraTextureId = -1
@@ -188,6 +200,15 @@ class ArRenderer(
         }
         onTrackingUpdate(trackingState, floorVisible)
 
+        // Only bother scoring texture while the courier is still hunting for a floor —
+        // once something is placed, this has done its job.
+        if (placedAnchor == null && trackingState == TrackingState.TRACKING) {
+            textureFrameCounter++
+            if (textureFrameCounter % textureFrameInterval == 0) {
+                updateTextureScore(frame)
+            }
+        }
+
         val tap = tapQueue.poll()
         if (tap != null && trackingState == TrackingState.TRACKING) {
             // Only accept the tap if it landed on an upward-facing horizontal plane —
@@ -212,6 +233,66 @@ class ArRenderer(
         if (anchor != null && anchor.trackingState == TrackingState.TRACKING) {
             drawBoxAt(anchor, camera)
         }
+    }
+
+    /**
+     * Grabs one CPU-readable frame from ARCore, runs the same grayscale-then-Canny
+     * pipeline Feature 2 uses, and reports the % of edge pixels as a rough proxy for
+     * how much visual texture ARCore has to track against. This is illustrative, not
+     * a calibrated measurement — ARCore's own feature detector is not Canny — but it
+     * moves in the same direction: near zero on a blank wall, higher on a busy floor.
+     */
+    private fun updateTextureScore(frame: Frame) {
+        var image: Image? = null
+        try {
+            image = frame.acquireCameraImage()
+            onTextureScore(computeEdgeDensity(image))
+        } catch (e: Exception) {
+            // NotYetAvailableException / DeadlineExceededException / ResourceExhaustedException —
+            // any of these just means "skip this frame's texture check," not a real error.
+            Log.w("ArRenderer", "Texture score skipped: ${e.javaClass.simpleName}")
+        } finally {
+            image?.close()
+        }
+    }
+
+    private fun computeEdgeDensity(image: Image): Float {
+        val yPlane = image.planes[0]
+        val buffer = yPlane.buffer
+        val rowStride = yPlane.rowStride
+        val pixelStride = yPlane.pixelStride
+        val width = image.width
+        val height = image.height
+
+        val data = ByteArray(buffer.remaining())
+        buffer.get(data)
+
+        val full = Mat(height, width, CvType.CV_8UC1)
+        if (pixelStride == 1 && rowStride == width) {
+            full.put(0, 0, data)
+        } else {
+            val rowBytes = ByteArray(width)
+            for (row in 0 until height) {
+                System.arraycopy(data, row * rowStride, rowBytes, 0, width)
+                full.put(row, 0, rowBytes)
+            }
+        }
+
+        // Downscale hard before Canny — this runs on the GL thread, so it has to stay cheap.
+        val small = Mat()
+        Imgproc.resize(full, small, Size(160.0, 160.0 * height / width))
+
+        val edges = Mat()
+        Imgproc.Canny(small, edges, 80.0, 150.0)
+
+        val edgePixels = Core.countNonZero(edges)
+        val totalPixels = (small.rows() * small.cols()).coerceAtLeast(1)
+
+        full.release()
+        small.release()
+        edges.release()
+
+        return edgePixels.toFloat() / totalPixels.toFloat() * 100f
     }
 
     private fun drawCameraBackground() {
