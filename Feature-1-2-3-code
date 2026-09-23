@@ -227,12 +227,35 @@ class ArViewModel : ViewModel() {
     private val _isPlaced = MutableStateFlow(false)
     val isPlaced: StateFlow<Boolean> = _isPlaced.asStateFlow()
 
+    private val _textureScore = MutableStateFlow<Float?>(null)
+    val textureScore: StateFlow<Float?> = _textureScore.asStateFlow()
+
+    private var lastTrackingState: TrackingState = TrackingState.PAUSED
+    private var lastFloorVisible: Boolean = false
+
+    // Rough, illustrative cutoff — not scientifically calibrated. Watch the printed
+    // score against a few real surfaces and adjust if it warns too often or too rarely.
+    private val lowTextureThreshold = 1.5f
+
     fun onTrackingUpdate(trackingState: TrackingState, floorVisible: Boolean) {
+        lastTrackingState = trackingState
+        lastFloorVisible = floorVisible
+        refreshStatus()
+    }
+
+    fun onTextureScore(score: Float) {
+        _textureScore.value = score
+        refreshStatus()
+    }
+
+    private fun refreshStatus() {
         if (_isPlaced.value) return
+        val score = _textureScore.value
         _statusMessage.value = when {
-            trackingState != TrackingState.TRACKING -> "Move your phone slowly to start tracking"
-            !floorVisible -> "Point your phone at the floor to detect it"
-            else -> "Floor detected — tap the floor to place the package"
+            lastTrackingState != TrackingState.TRACKING -> "Move your phone slowly to start tracking"
+            lastFloorVisible -> "Floor detected — tap the floor to place the package"
+            score != null && score < lowTextureThreshold -> "Low texture here — point at a more detailed surface"
+            else -> "Point your phone at the floor to detect it"
         }
     }
 
@@ -247,6 +270,7 @@ class ArViewModel : ViewModel() {
 
     fun reset() {
         _isPlaced.value = false
+        _textureScore.value = null
         _statusMessage.value = "Point your phone at the floor"
     }
 }
@@ -284,7 +308,7 @@ fun DropZoneApp(viewModel: CameraViewModel = viewModel()) {
             )
         }
         composable<Ar> {
-            ArScreen()
+            ArScreen(onBack = { navController.popBackStack() })
         }
     }
 }
@@ -394,18 +418,23 @@ fun CameraScreen(
 }
 
 @Composable
-fun ArScreen(arViewModel: ArViewModel = viewModel()) {
+fun ArScreen(
+    arViewModel: ArViewModel = viewModel(),
+    onBack: () -> Unit = {}
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val statusMessage by arViewModel.statusMessage.collectAsState()
     val isPlaced by arViewModel.isPlaced.collectAsState()
+    val textureScore by arViewModel.textureScore.collectAsState()
 
     val sessionHolder = remember { mutableStateOf<Session?>(null) }
     val renderer = remember {
         ArRenderer(
             onAnchorPlaced = { anchor -> arViewModel.onAnchorPlaced(anchor) },
             onNoFloorHit = { arViewModel.onNoFloorHit() },
-            onTrackingUpdate = { state, floorVisible -> arViewModel.onTrackingUpdate(state, floorVisible) }
+            onTrackingUpdate = { state, floorVisible -> arViewModel.onTrackingUpdate(state, floorVisible) },
+            onTextureScore = { score -> arViewModel.onTextureScore(score) }
         )
     }
 
@@ -458,6 +487,15 @@ fun ArScreen(arViewModel: ArViewModel = viewModel()) {
             modifier = Modifier.fillMaxSize()
         )
 
+        Button(
+            onClick = onBack,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(16.dp)
+        ) {
+            Text("Back")
+        }
+
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -472,6 +510,16 @@ fun ArScreen(arViewModel: ArViewModel = viewModel()) {
                     .background(Color.Black, shape = RoundedCornerShape(8.dp))
                     .padding(horizontal = 12.dp, vertical = 6.dp)
             )
+            if (textureScore != null) {
+                Text(
+                    text = "Surface texture: ${"%.1f".format(textureScore)}% edges",
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier
+                        .background(Color.Black.copy(alpha = 0.6f), shape = RoundedCornerShape(8.dp))
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                )
+            }
             if (isPlaced) {
                 Button(onClick = {
                     renderer.clearAnchor()
