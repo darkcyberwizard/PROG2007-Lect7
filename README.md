@@ -23,7 +23,36 @@ Each `Feature-*-code` file is the complete `MainActivity.kt` for that stage, not
 
 1. **Create the project** in Android Studio: Empty Activity (Compose), name `Lect7ARCV`, package `com.example.lect7arcv`, minSdk 24 (ARCore's minimum).
 
-2. **Add the plugin** (needed for the `@Serializable` navigation routes) to the module's `build.gradle.kts` `plugins {}` block:
+2. **Add the plugin** (needed for the `@Serializable` navigation routes).
+
+   Modern Android Studio templates use a version catalog, so the plugin needs to go in two places:
+
+   In `gradle/libs.versions.toml`, add this under `[plugins]` (create the section if it isn't there):
+```toml
+   [plugins]
+   kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+```
+   (`version.ref = "kotlin"` reuses the Kotlin version already defined under `[versions]` for Compose — no new version string needed.)
+
+   Then in the **top-level** `build.gradle.kts`:
+```kotlin
+   plugins {
+       alias(libs.plugins.android.application) apply false
+       alias(libs.plugins.kotlin.compose) apply false
+       alias(libs.plugins.kotlin.serialization) apply false
+   }
+```
+
+   And in the **module** `app/build.gradle.kts`:
+```kotlin
+   plugins {
+       alias(libs.plugins.android.application)
+       alias(libs.plugins.kotlin.compose)
+       alias(libs.plugins.kotlin.serialization)
+   }
+```
+
+   If a project isn't using a version catalog at all, the old direct form still works as a fallback:
 ```kotlin
    id("org.jetbrains.kotlin.plugin.serialization") version "<matches your Kotlin version>"
 ```
